@@ -210,4 +210,4 @@ PyAutoGUI==0.9.54
 
 ---
 
-**🎯 Sistema pronto para produção | ⚡ 100% automático | 📊 Relatórios inteligentes**
+**Desenvolvido para o SINTUNIFEI** | Sistema de envio de declarações no e-cac
