@@ -22,6 +22,11 @@ PLANILHA = ''
 # Arquivo do banco de dados para checkpoints
 BANCO_DADOS = ''
 
+# Modo de operação:
+# - "inclusao": fluxo atual de inclusão/envio
+# - "retificacao": altera valor de titulares já enviados
+MODO_OPERACAO = "inclusao"
+
 # ============================================================
 # DADOS DA EMPRESA
 # ============================================================
@@ -50,6 +55,12 @@ TIMEOUT_ALERTA_SUCESSO = 60
 
 # Timeout para localizar próximo CPF (segundos)
 TIMEOUT_PROXIMO_CPF = 15
+
+# Timeout para busca e abertura de evento na retificação (segundos)
+RETIFICACAO_TIMEOUT_LISTAR = 15
+
+# Timeout para mensagem de sucesso após concluir retificação (segundos)
+RETIFICACAO_TIMEOUT_SUCESSO = 60
 
 # Tempo de espera para cliques (usado nos métodos de assinatura)
 TEMPO_ESPERA_CLIQUE = 0.5
@@ -157,6 +168,23 @@ TEMPO_MODO_AUTOMATICO = 1
 
 # Tempo de espera em execução via script durante verificação (segundos)
 TEMPO_SCRIPT_VERIFICACAO = 2
+
+# ============================================================
+# SELETORES CSS - FLUXO DE RETIFICAÇÃO
+# ============================================================
+#
+# Preencha com "Copy selector" dos elementos da tela de retificação.
+# Os valores abaixo são placeholders e devem ser ajustados no config.py.
+
+RETIFICACAO_SELETOR_CAMPO_CPF = '#cpf_beneficiario'
+RETIFICACAO_SELETOR_BOTAO_LISTAR = '[data-testid="botao_listar"]'
+RETIFICACAO_SELETOR_BOTAO_RETIFICAR = '[data-testid="botao_retificar"]'
+RETIFICACAO_SELETOR_BOTAO_ALTERAR_TITULAR = '[data-testid="botao_alterar_titular"]'
+RETIFICACAO_SELETOR_CAMPO_VALOR_PAGO = '#vlr_pago_titular'
+RETIFICACAO_SELETOR_BOTAO_SALVAR = '[data-testid="botao_salvar"]'
+RETIFICACAO_SELETOR_BOTAO_CONCLUIR_ENVIAR = '[data-testid="botao_concluir_enviar"]'
+RETIFICACAO_SELETOR_MENSAGEM_SUCESSO = '[data-testid="mensagem_sucesso"]'
+RETIFICACAO_SELETOR_BOTAO_VOLTAR_LISTA = '[data-testid="botao_voltar_lista_eventos"]'
 
 # ============================================================
 # CONFIGURAÇÕES DE TESTE (para funções de demonstração)

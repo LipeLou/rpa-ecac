@@ -33,14 +33,14 @@
 
 # Ou manualmente
 venv\Scripts\activate
-python automacao_efd.py
+python main.py
 ```
 
 ### Linux/Mac
 ```bash
 # Execução rápida
 source venv/bin/activate
-python automacao_efd.py
+python main.py
 ```
 
 
@@ -77,7 +77,25 @@ PLANILHA = "MÊS - ANO"  # Nome da aba no Excel (sheet)
 VERIFICACAO_MANUAL_PADRAO = False    # True = pausa para revisar
 METODO_ASSINATURA_PADRAO = 2         # 1=Apenas teclado, 2=Mouse + teclado
 CHROME_VERSION = 141                  # Versão do Chrome instalada
+MODO_OPERACAO = "inclusao"           # "inclusao" ou "retificacao"
 ```
+
+### Modo Retificação de Titulares
+
+Para corrigir valores já enviados:
+
+1. Defina `MODO_OPERACAO = "retificacao"` no `config.py`.
+2. Configure os seletores `RETIFICACAO_SELETOR_*` no `config.py` usando `Copy selector`.
+3. Execute `python main.py`.
+
+Fluxo automatizado de retificação:
+
+`CPF titular -> Listar -> Retificar -> Alterar titular -> Salvar -> Concluir e enviar -> Voltar para a lista de eventos`
+
+Se um CPF não tiver botão `Retificar`, o sistema registra como pendência e gera ao final uma planilha:
+
+- `titulares_nao_alterados_<timestamp>.xlsx`
+- colunas: `CPF`, `NOME`, `VALOR_NOVO_PLANEJADO`, `MOTIVO`, `TIMESTAMP`
 
 
 ## 🔐 Métodos de Assinatura
@@ -115,7 +133,7 @@ A planilha deve conter pelo menos as seguintes colunas:
 
 ### 🔗 Mapeamento de Dependências
 
-O sistema mapeia automaticamente os valores da coluna `DEPENDENCIA` da planilha Excel para os códigos do formulário da Receita Federal. O mapeamento está definido no arquivo `automacao_efd.py` na constante `MAPEAMENTO_DEPENDENCIAS`.
+O sistema mapeia automaticamente os valores da coluna `DEPENDENCIA` da planilha Excel para os códigos do formulário da Receita Federal. O mapeamento está definido no arquivo `main.py` na constante `MAPEAMENTO_DEPENDENCIAS`.
 
 #### Valores Padrão do Mapeamento
 
@@ -143,10 +161,10 @@ O sistema mapeia automaticamente os valores da coluna `DEPENDENCIA` da planilha 
 
 ```bash
 # Windows
-.\gerenciar_db.bat
+.\gerenciar.bat
 
 # Linux/Mac  
-python gerenciar_checkpoint.py
+python manage.py
 ```
 
 **Funcionalidades disponíveis:**
@@ -161,14 +179,14 @@ python gerenciar_checkpoint.py
 ## 📁 Estrutura do Projeto
 
 ```
-rpa-dirf/
+rpa-ecac/
 ├── main.py        # Automação principal
 ├── manage.py # Gerenciador de progresso  
 ├── config.py               # Configurações
 ├── dados.xlsx              # Planilha com dados
 ├── requirements.txt        # Dependências
 ├── executar.bat           # Atalho Windows (opcional)
-└── gerenciar_db.bat       # Atalho Windows (opcional)
+└── gerenciar.bat          # Atalho Windows (opcional)
 ```
 
 

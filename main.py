@@ -10,6 +10,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 from selenium_stealth import stealth
 import time
 import random
@@ -196,6 +197,8 @@ class AutomacaoEFD:
         self.verificar_dados_manual = VERIFICACAO_MANUAL_PADRAO  # Por padrão, verificar dados manualmente
         self.metodo_assinatura = METODO_ASSINATURA_PADRAO  # Por padrão, usar método A
         self.coordenadas_mouse_metodo_b = COORDENADAS_MOUSE_METODO_B  # Carregar do config
+        self.modo_operacao = str(globals().get("MODO_OPERACAO", "inclusao")).strip().lower()
+        self.titulares_nao_retificados = []
         self.inicializar_banco_dados()
         self.configurar_chrome()
     
@@ -2423,6 +2426,289 @@ class AutomacaoEFD:
             return count > 0
         except:
             return False
+
+    def obter_config(self, chave, valor_padrao=None):
+        """Obtém configuração com fallback para valor padrão."""
+        return globals().get(chave, valor_padrao)
+
+    def clicar_por_seletor(self, seletor_css, timeout=None):
+        """Aguarda e clica em um elemento por seletor CSS."""
+        tempo = timeout if timeout is not None else self.obter_config("TIMEOUT_WEBDRIVER", 10)
+        elemento = WebDriverWait(self.driver, tempo).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, seletor_css))
+        )
+        try:
+            elemento.click()
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", elemento)
+        return elemento
+
+    def preencher_input_por_seletor(self, seletor_css, valor, timeout=None):
+        """Preenche um input por seletor CSS."""
+        tempo = timeout if timeout is not None else self.obter_config("TIMEOUT_WEBDRIVER", 10)
+        campo = WebDriverWait(self.driver, tempo).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, seletor_css))
+        )
+        campo.clear()
+        self.digitar_devagar(campo, valor)
+        return campo
+
+    def buscar_retificacao_por_cpf(self, cpf_titular):
+        """Preenche CPF e clica em Listar na tela de retificação."""
+        seletor_cpf = self.obter_config("RETIFICACAO_SELETOR_CAMPO_CPF", "#cpf_beneficiario")
+        seletor_listar = self.obter_config("RETIFICACAO_SELETOR_BOTAO_LISTAR", '[data-testid="botao_listar"]')
+        timeout_listar = self.obter_config("RETIFICACAO_TIMEOUT_LISTAR", self.obter_config("TIMEOUT_WEBDRIVER", 10))
+
+        self.preencher_input_por_seletor(seletor_cpf, cpf_titular, timeout=timeout_listar)
+        self.clicar_por_seletor(seletor_listar, timeout=timeout_listar)
+
+    def obter_botao_retificar(self):
+        """Retorna o botão Retificar quando existir para o CPF buscado."""
+        seletor_retificar = self.obter_config("RETIFICACAO_SELETOR_BOTAO_RETIFICAR", '[data-testid="botao_retificar"]')
+        timeout_listar = self.obter_config("RETIFICACAO_TIMEOUT_LISTAR", self.obter_config("TIMEOUT_WEBDRIVER", 10))
+        try:
+            return WebDriverWait(self.driver, timeout_listar).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, seletor_retificar))
+            )
+        except TimeoutException:
+            return None
+
+    def registrar_titular_nao_retificado(self, cpf_titular, nome_titular, valor_planejado, motivo):
+        """Registra titular sem retificação para planilha final."""
+        self.titulares_nao_retificados.append({
+            "CPF": cpf_titular,
+            "NOME": nome_titular,
+            "VALOR_NOVO_PLANEJADO": valor_planejado,
+            "MOTIVO": motivo,
+            "TIMESTAMP": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+    def gerar_planilha_titulares_nao_retificados(self):
+        """Gera planilha de titulares não alterados por ausência de retificação."""
+        if not self.titulares_nao_retificados:
+            print("ℹ️ Nenhum titular sem retificação para exportar.")
+            return
+
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            nome_arquivo = f"titulares_nao_alterados_{timestamp}.xlsx"
+            df = pd.DataFrame(self.titulares_nao_retificados)
+            df.to_excel(nome_arquivo, index=False)
+            print(f"📄 Planilha de não alterados gerada: {nome_arquivo}")
+            print(f"📊 Total de titulares não alterados: {len(df)}")
+        except Exception as e:
+            print(f"❌ Erro ao gerar planilha de não alterados: {e}")
+
+    def verificar_titular_finalizado_retificacao(self, cpf_titular):
+        """Verifica se o titular já foi finalizado no fluxo de retificação."""
+        try:
+            conn = sqlite3.connect(BANCO_DADOS)
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT etapa_atual, status
+                FROM progresso_efd
+                WHERE cpf_titular = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                ''',
+                (cpf_titular,),
+            )
+            resultado = cursor.fetchone()
+            conn.close()
+
+            if not resultado:
+                return False
+
+            etapa, status = resultado
+            etapas_finais = {"retificacao_sucesso", "retificacao_sem_evento", "retificacao_valor_invalido"}
+            return etapa in etapas_finais and status in {"sucesso", "pulado"}
+        except Exception:
+            return False
+
+    def processar_grupo_retificacao(self, titular):
+        """Processa retificação de valor para um único titular."""
+        try:
+            cpf_titular = titular["CPF"]
+            nome_titular = titular["NOME"]
+            valor_titular_raw = titular.get("VALOR_PLANO") or titular.get("TOTAL")
+
+            self.cpf_titular_atual = cpf_titular
+            self.nome_titular_atual = nome_titular
+
+            if valor_titular_raw is None or self.valor_eh_zero_ou_nulo(valor_titular_raw):
+                self.salvar_checkpoint(
+                    cpf_titular,
+                    nome_titular,
+                    "retificacao_valor_invalido",
+                    "pulado",
+                    observacoes="Titular ignorado por valor nulo/zero para retificação",
+                )
+                return "pulado"
+
+            valor_titular = self.formatar_valor(valor_titular_raw)
+
+            self.salvar_checkpoint(
+                cpf_titular,
+                nome_titular,
+                "retificacao_listar",
+                "em_andamento",
+                observacoes=f"Buscando CPF para retificação. Novo valor: {valor_titular}",
+            )
+            self.buscar_retificacao_por_cpf(cpf_titular)
+
+            botao_retificar = self.obter_botao_retificar()
+            if not botao_retificar:
+                motivo = "CPF não listado/sem botão Retificar"
+                self.registrar_titular_nao_retificado(cpf_titular, nome_titular, valor_titular, motivo)
+                self.salvar_checkpoint(
+                    cpf_titular,
+                    nome_titular,
+                    "retificacao_sem_evento",
+                    "pulado",
+                    observacoes=motivo,
+                )
+                return "sem_evento"
+
+            botao_retificar.click()
+            self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_abrir_evento", "sucesso")
+
+            seletor_alterar = self.obter_config(
+                "RETIFICACAO_SELETOR_BOTAO_ALTERAR_TITULAR",
+                '[data-testid="botao_alterar_titular"]',
+            )
+            seletor_valor = self.obter_config("RETIFICACAO_SELETOR_CAMPO_VALOR_PAGO", '#vlr_pago_titular')
+            seletor_salvar = self.obter_config("RETIFICACAO_SELETOR_BOTAO_SALVAR", '[data-testid="botao_salvar"]')
+            seletor_concluir = self.obter_config(
+                "RETIFICACAO_SELETOR_BOTAO_CONCLUIR_ENVIAR",
+                '[data-testid="botao_concluir_enviar"]',
+            )
+            seletor_mensagem = self.obter_config(
+                "RETIFICACAO_SELETOR_MENSAGEM_SUCESSO",
+                '[data-testid="mensagem_sucesso"]',
+            )
+            seletor_voltar = self.obter_config(
+                "RETIFICACAO_SELETOR_BOTAO_VOLTAR_LISTA",
+                '[data-testid="botao_voltar_lista_eventos"]',
+            )
+            timeout_sucesso = self.obter_config("RETIFICACAO_TIMEOUT_SUCESSO", self.obter_config("TIMEOUT_ALERTA_SUCESSO", 60))
+
+            self.clicar_por_seletor(seletor_alterar)
+            self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_alterar_titular", "sucesso")
+
+            self.preencher_input_por_seletor(seletor_valor, valor_titular)
+            self.clicar_por_seletor(seletor_salvar)
+            self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_salvar_titular", "sucesso")
+
+            self.clicar_por_seletor(seletor_concluir)
+            self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_concluir_enviar", "em_andamento")
+
+            try:
+                mensagem = WebDriverWait(self.driver, timeout_sucesso).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, seletor_mensagem))
+                )
+                texto_sucesso = mensagem.text or ""
+            except TimeoutException:
+                texto_sucesso = self.driver.page_source
+
+            if "MS7004" not in texto_sucesso and "Evento alterado com sucesso" not in texto_sucesso:
+                self.salvar_checkpoint(
+                    cpf_titular,
+                    nome_titular,
+                    "retificacao_sucesso",
+                    "erro",
+                    observacoes="Mensagem de sucesso da retificação não detectada",
+                )
+                return "erro"
+
+            self.salvar_checkpoint(
+                cpf_titular,
+                nome_titular,
+                "retificacao_sucesso",
+                "sucesso",
+                observacoes="Sucesso: MS7004 - Evento alterado com sucesso.",
+            )
+
+            self.clicar_por_seletor(seletor_voltar)
+            self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_volta_lista", "sucesso")
+            return "sucesso"
+
+        except Exception as e:
+            self.salvar_checkpoint(
+                self.cpf_titular_atual or titular.get("CPF", ""),
+                self.nome_titular_atual or titular.get("NOME", "Titular"),
+                "retificacao_erro",
+                "erro",
+                observacoes=f"Erro no fluxo de retificação: {str(e)}",
+            )
+            print(f"❌ Erro na retificação do titular: {e}")
+            return "erro"
+
+    def processar_todos_os_grupos_retificacao(self):
+        """Processa retificação para todos os titulares do mês."""
+        try:
+            print("\n" + "=" * 60)
+            print("🔄 PROCESSANDO RETIFICAÇÃO DE TITULARES")
+            print("=" * 60)
+
+            self.titulares_nao_retificados = []
+            grupos = self.processar_dataframe_por_grupos()
+            if not grupos:
+                print("❌ Nenhum grupo encontrado para retificação")
+                return
+
+            checkpoint_indice = self.carregar_checkpoint_indice()
+            inicio = checkpoint_indice + 1 if checkpoint_indice >= 0 else 0
+            if inicio >= len(grupos):
+                print("✅ Todos os grupos já foram processados na retificação")
+                return
+
+            sucessos = 0
+            sem_evento = 0
+            pulados = 0
+            erros = 0
+
+            for i in range(inicio, len(grupos)):
+                titular = grupos[i][0]
+                cpf_titular = titular["CPF"]
+
+                print(f"\n{'=' * 60}")
+                print(f"🔄 Retificação {i + 1}/{len(grupos)}")
+                print(f"👤 Titular: {titular['NOME']} - CPF: {cpf_titular}")
+
+                if self.verificar_titular_finalizado_retificacao(cpf_titular):
+                    print("⏭️ Titular já finalizado na retificação - pulando")
+                    pulados += 1
+                    continue
+
+                resultado = self.processar_grupo_retificacao(titular)
+                if resultado == "sucesso":
+                    sucessos += 1
+                    self.salvar_checkpoint_indice(i)
+                elif resultado == "sem_evento":
+                    sem_evento += 1
+                    self.salvar_checkpoint_indice(i)
+                elif resultado == "pulado":
+                    pulados += 1
+                    self.salvar_checkpoint_indice(i)
+                else:
+                    erros += 1
+
+                time.sleep(TEMPO_ENTRE_GRUPOS)
+
+            print("\n" + "=" * 60)
+            print("📊 RESUMO DA RETIFICAÇÃO")
+            print("=" * 60)
+            print(f"✅ Sucesso: {sucessos}")
+            print(f"ℹ️ Sem evento para retificar: {sem_evento}")
+            print(f"⏭️ Pulados: {pulados}")
+            print(f"❌ Erros: {erros}")
+            print("=" * 60)
+
+            self.gerar_planilha_titulares_nao_retificados()
+
+        except Exception as e:
+            print(f"❌ Erro ao processar retificação em lote: {e}")
     
     def executar(self):
         """
@@ -2450,18 +2736,28 @@ class AutomacaoEFD:
         print("\n" + "="*60)
         print("🤖 AUTOMAÇÃO EFD-REINF")
         print("="*60)
+        modo = self.obter_config("MODO_OPERACAO", self.modo_operacao).strip().lower()
+        self.modo_operacao = "retificacao" if modo == "retificacao" else "inclusao"
+
         print("\n💡 FUNCIONAMENTO:")
         print("   1. Chrome abre no site")
         print("   2. VOCÊ faz login e navega até o formulário")
-        print("   3. CÓDIGO processa TODOS os grupos automaticamente")
-        print("   4. Pula automaticamente CPFs já lançados")
-        print("   5. ✨ NOVO: Envia automaticamente cada declaração")
+        if self.modo_operacao == "retificacao":
+            print("   3. CÓDIGO retifica o valor do titular para todos os grupos")
+            print("   4. Conclui envio e volta para lista de eventos")
+            print("   5. Gera planilha dos CPFs sem botão Retificar")
+        else:
+            print("   3. CÓDIGO processa TODOS os grupos automaticamente")
+            print("   4. Pula automaticamente CPFs já lançados")
+            print("   5. Envia automaticamente cada declaração")
         print("="*60)
         
         # Configurações automáticas do config.py
         print("\n⚙️ CONFIGURAÇÕES AUTOMÁTICAS")
         print("="*40)
         
+        print(f"✅ Modo de operação: {self.modo_operacao.upper()}")
+
         # Configurar verificação manual usando config.py
         if VERIFICACAO_MANUAL_PADRAO:
             print("✅ Modo MANUAL: Com verificação antes do envio")
@@ -2469,14 +2765,17 @@ class AutomacaoEFD:
         else:
             print("✅ Modo AUTOMÁTICO: Sem verificação manual")
             print("⚠️ O sistema enviará as declarações automaticamente!")
-        
-        # Configurar método de assinatura básico usando config.py
-        if METODO_ASSINATURA_PADRAO == 2:
-            self.metodo_assinatura = 2
-            print("✅ Método B selecionado (sequência alternativa)")
+
+        # Método de assinatura só é usado no fluxo de inclusão
+        if self.modo_operacao == "inclusao":
+            if METODO_ASSINATURA_PADRAO == 2:
+                self.metodo_assinatura = 2
+                print("✅ Método B selecionado (sequência alternativa)")
+            else:
+                self.metodo_assinatura = 1
+                print("✅ Método A selecionado (sequência padrão)")
         else:
-            self.metodo_assinatura = 1
-            print("✅ Método A selecionado (sequência padrão)")
+            print("ℹ️ Modo retificação: assinatura automática não é utilizada neste fluxo")
         
         print("\n💡 Para alterar essas configurações, edite o arquivo config.py")
         print("="*60)
@@ -2488,7 +2787,7 @@ class AutomacaoEFD:
         self.aguardar_login()
         
         # Configurar coordenadas para Método B DEPOIS de acessar o ECAC
-        if METODO_ASSINATURA_PADRAO == 2:
+        if self.modo_operacao == "inclusao" and METODO_ASSINATURA_PADRAO == 2:
             print("\n" + "="*60)
             print("📍 CONFIGURAÇÃO DE COORDENADAS - MÉTODO B")
             print("="*60)
@@ -2531,10 +2830,13 @@ class AutomacaoEFD:
                     coordenadas_configuradas = True
         
         # Processar todos os grupos
-        self.processar_todos_os_grupos()
+        if self.modo_operacao == "retificacao":
+            self.processar_todos_os_grupos_retificacao()
+        else:
+            self.processar_todos_os_grupos()
         
         print("\n✅ Processo concluído!")
-        print("💡 Use o gerenciador de checkpoint para ver detalhes: python gerenciar_checkpoint.py")
+        print("💡 Use o gerenciador de checkpoint para ver detalhes: python manage.py")
         print("🚀 Sistema totalmente funcional com automação completa!")
 
 # ============================================================
