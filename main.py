@@ -2431,11 +2431,54 @@ class AutomacaoEFD:
         """Obtém configuração com fallback para valor padrão."""
         return globals().get(chave, valor_padrao)
 
+    def normalizar_seletores(self, seletor_principal, seletores_fallback=None):
+        """
+        Normaliza configuração de seletores para uma lista sem duplicidade.
+        Aceita string simples, lista/tupla ou string com separador '||'.
+        """
+        seletores = []
+
+        if isinstance(seletor_principal, (list, tuple)):
+            seletores.extend([s for s in seletor_principal if s])
+        elif isinstance(seletor_principal, str) and seletor_principal.strip():
+            if "||" in seletor_principal:
+                partes = [p.strip() for p in seletor_principal.split("||") if p.strip()]
+                seletores.extend(partes)
+            else:
+                seletores.append(seletor_principal.strip())
+
+        for seletor in seletores_fallback or []:
+            if seletor and seletor not in seletores:
+                seletores.append(seletor)
+
+        return seletores
+
+    def localizar_elemento_com_fallback(self, seletores_css, timeout, condicao, descricao):
+        """Tenta localizar elemento com fallback de seletores CSS."""
+        ultimo_erro = None
+        for seletor in seletores_css:
+            try:
+                return WebDriverWait(self.driver, timeout).until(
+                    condicao((By.CSS_SELECTOR, seletor))
+                )
+            except TimeoutException as erro:
+                ultimo_erro = erro
+                continue
+
+        raise TimeoutException(
+            f"Não foi possível localizar {descricao}. "
+            f"Seletores testados: {seletores_css}"
+        ) from ultimo_erro
+
     def clicar_por_seletor(self, seletor_css, timeout=None):
         """Aguarda e clica em um elemento por seletor CSS."""
         tempo = timeout if timeout is not None else self.obter_config("TIMEOUT_WEBDRIVER", 10)
-        elemento = WebDriverWait(self.driver, tempo).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, seletor_css))
+        seletores = self.normalizar_seletores(seletor_css)
+        elemento = self.localizar_elemento_com_fallback(
+            seletores_css=seletores,
+            timeout=tempo,
+            condicao=EC.element_to_be_clickable,
+            descricao="elemento clicável",
         )
         try:
             elemento.click()
@@ -2446,8 +2489,12 @@ class AutomacaoEFD:
     def preencher_input_por_seletor(self, seletor_css, valor, timeout=None):
         """Preenche um input por seletor CSS."""
         tempo = timeout if timeout is not None else self.obter_config("TIMEOUT_WEBDRIVER", 10)
-        campo = WebDriverWait(self.driver, tempo).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, seletor_css))
+        seletores = self.normalizar_seletores(seletor_css)
+        campo = self.localizar_elemento_com_fallback(
+            seletores_css=seletores,
+            timeout=tempo,
+            condicao=EC.presence_of_element_located,
+            descricao="campo de entrada",
         )
         campo.clear()
         self.digitar_devagar(campo, valor)
@@ -2459,16 +2506,37 @@ class AutomacaoEFD:
         seletor_listar = self.obter_config("RETIFICACAO_SELETOR_BOTAO_LISTAR", '[data-testid="botao_listar"]')
         timeout_listar = self.obter_config("RETIFICACAO_TIMEOUT_LISTAR", self.obter_config("TIMEOUT_WEBDRIVER", 10))
 
-        self.preencher_input_por_seletor(seletor_cpf, cpf_titular, timeout=timeout_listar)
-        self.clicar_por_seletor(seletor_listar, timeout=timeout_listar)
+        seletores_cpf = self.normalizar_seletores(
+            seletor_cpf,
+            seletores_fallback=["#cpf_beneficiario", '[data-testid="cpf_beneficiario"]'],
+        )
+        seletores_listar = self.normalizar_seletores(
+            seletor_listar,
+            seletores_fallback=['[data-testid="botao_listar"]', "#btn-listar", "button[type='submit']"],
+        )
+
+        self.preencher_input_por_seletor(seletores_cpf, cpf_titular, timeout=timeout_listar)
+        self.clicar_por_seletor(seletores_listar, timeout=timeout_listar)
 
     def obter_botao_retificar(self):
         """Retorna o botão Retificar quando existir para o CPF buscado."""
         seletor_retificar = self.obter_config("RETIFICACAO_SELETOR_BOTAO_RETIFICAR", '[data-testid="botao_retificar"]')
+        seletores_retificar = self.normalizar_seletores(
+            seletor_retificar,
+            seletores_fallback=[
+                '[data-testid^="botao_retificar_"]',
+                '[data-testid="botao_retificar"]',
+                "button[title*='Retificar']",
+                "button[aria-label*='Retificar']",
+            ],
+        )
         timeout_listar = self.obter_config("RETIFICACAO_TIMEOUT_LISTAR", self.obter_config("TIMEOUT_WEBDRIVER", 10))
         try:
-            return WebDriverWait(self.driver, timeout_listar).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, seletor_retificar))
+            return self.localizar_elemento_com_fallback(
+                seletores_css=seletores_retificar,
+                timeout=timeout_listar,
+                condicao=EC.element_to_be_clickable,
+                descricao="botão Retificar",
             )
         except TimeoutException:
             return None
@@ -2528,6 +2596,7 @@ class AutomacaoEFD:
 
     def processar_grupo_retificacao(self, titular):
         """Processa retificação de valor para um único titular."""
+        etapa_atual = "inicio"
         try:
             cpf_titular = titular["CPF"]
             nome_titular = titular["NOME"]
@@ -2555,8 +2624,10 @@ class AutomacaoEFD:
                 "em_andamento",
                 observacoes=f"Buscando CPF para retificação. Novo valor: {valor_titular}",
             )
+            etapa_atual = "buscar_cpf_e_listar"
             self.buscar_retificacao_por_cpf(cpf_titular)
 
+            etapa_atual = "aguardar_botao_retificar"
             botao_retificar = self.obter_botao_retificar()
             if not botao_retificar:
                 motivo = "CPF não listado/sem botão Retificar"
@@ -2570,6 +2641,7 @@ class AutomacaoEFD:
                 )
                 return "sem_evento"
 
+            etapa_atual = "abrir_evento_para_retificar"
             botao_retificar.click()
             self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_abrir_evento", "sucesso")
 
@@ -2593,11 +2665,42 @@ class AutomacaoEFD:
             )
             timeout_sucesso = self.obter_config("RETIFICACAO_TIMEOUT_SUCESSO", self.obter_config("TIMEOUT_ALERTA_SUCESSO", 60))
 
-            self.clicar_por_seletor(seletor_alterar)
+            seletores_alterar = self.normalizar_seletores(
+                seletor_alterar,
+                seletores_fallback=[
+                    '[data-testid^="collapse_botao_alterar_ide_op_saude_"]',
+                    '[data-testid="botao_alterar_titular"]',
+                    "button[title*='Alterar']",
+                ],
+            )
+            seletores_valor = self.normalizar_seletores(
+                seletor_valor,
+                seletores_fallback=['#vlr_pago_titular', '[data-testid="valor_saude"]', "input[name*='valor']"],
+            )
+            seletores_salvar = self.normalizar_seletores(
+                seletor_salvar,
+                seletores_fallback=['[data-testid="botao_salvar_modal_ide_op_saude"]', '[data-testid="botao_salvar"]'],
+            )
+            seletores_concluir = self.normalizar_seletores(
+                seletor_concluir,
+                seletores_fallback=['[data-testid="botao_concluir_enviar"]', "button[title*='Concluir']"],
+            )
+            seletores_mensagem = self.normalizar_seletores(
+                seletor_mensagem,
+                seletores_fallback=['[data-testid^="mensagem_descricao_"]', '[data-testid="mensagem_sucesso"]'],
+            )
+            seletores_voltar = self.normalizar_seletores(
+                seletor_voltar,
+                seletores_fallback=['app-evento4010-totalizador button.button', '[data-testid="botao_voltar_lista_eventos"]'],
+            )
+
+            etapa_atual = "abrir_modal_alteracao_titular"
+            self.clicar_por_seletor(seletores_alterar)
             self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_alterar_titular", "sucesso")
 
-            self.preencher_input_por_seletor(seletor_valor, valor_titular)
-            self.clicar_por_seletor(seletor_salvar)
+            etapa_atual = "preencher_valor_e_salvar"
+            self.preencher_input_por_seletor(seletores_valor, valor_titular)
+            self.clicar_por_seletor(seletores_salvar)
             self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_salvar_titular", "sucesso")
 
             # Pausa opcional para revisão manual no fluxo de retificação
@@ -2617,12 +2720,17 @@ class AutomacaoEFD:
             else:
                 time.sleep(TEMPO_MODO_AUTOMATICO)
 
-            self.clicar_por_seletor(seletor_concluir)
+            etapa_atual = "concluir_e_enviar"
+            self.clicar_por_seletor(seletores_concluir)
             self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_concluir_enviar", "em_andamento")
 
             try:
-                mensagem = WebDriverWait(self.driver, timeout_sucesso).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, seletor_mensagem))
+                etapa_atual = "aguardar_mensagem_sucesso"
+                mensagem = self.localizar_elemento_com_fallback(
+                    seletores_css=seletores_mensagem,
+                    timeout=timeout_sucesso,
+                    condicao=EC.presence_of_element_located,
+                    descricao="mensagem de sucesso da retificação",
                 )
                 texto_sucesso = mensagem.text or ""
             except TimeoutException:
@@ -2646,7 +2754,8 @@ class AutomacaoEFD:
                 observacoes="Sucesso: MS7004 - Evento alterado com sucesso.",
             )
 
-            self.clicar_por_seletor(seletor_voltar)
+            etapa_atual = "voltar_lista_eventos"
+            self.clicar_por_seletor(seletores_voltar)
             self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_volta_lista", "sucesso")
             return "sucesso"
 
@@ -2656,9 +2765,9 @@ class AutomacaoEFD:
                 self.nome_titular_atual or titular.get("NOME", "Titular"),
                 "retificacao_erro",
                 "erro",
-                observacoes=f"Erro no fluxo de retificação: {str(e)}",
+                observacoes=f"Erro no fluxo de retificação na etapa '{etapa_atual}': {str(e)}",
             )
-            print(f"❌ Erro na retificação do titular: {e}")
+            print(f"❌ Erro na retificação do titular (etapa: {etapa_atual}): {e}")
             return "erro"
 
     def processar_todos_os_grupos_retificacao(self):
