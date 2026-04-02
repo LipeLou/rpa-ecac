@@ -2600,6 +2600,23 @@ class AutomacaoEFD:
             self.clicar_por_seletor(seletor_salvar)
             self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_salvar_titular", "sucesso")
 
+            # Pausa opcional para revisão manual no fluxo de retificação
+            if self.verificar_dados_manual:
+                print(f"\n{'='*60}")
+                print("⏸️ PAUSA PARA ANÁLISE - RETIFICAÇÃO")
+                print(f"{'='*60}")
+                print(f"👤 Titular: {nome_titular} - CPF: {cpf_titular}")
+                print(f"💰 Novo valor salvo: {valor_titular}")
+                print("📋 Verifique se os dados estão corretos antes de concluir o envio.")
+                print("💡 Após revisar, pressione ENTER para continuar...")
+                try:
+                    input("\n⏸️ Pressione ENTER para concluir e enviar...")
+                except (EOFError, KeyboardInterrupt):
+                    print(f"\n⚠️ Execução não interativa - aguardando {TEMPO_SCRIPT_VERIFICACAO}s...")
+                    time.sleep(TEMPO_SCRIPT_VERIFICACAO)
+            else:
+                time.sleep(TEMPO_MODO_AUTOMATICO)
+
             self.clicar_por_seletor(seletor_concluir)
             self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_concluir_enviar", "em_andamento")
 
