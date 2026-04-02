@@ -2470,6 +2470,54 @@ class AutomacaoEFD:
             f"Seletores testados: {seletores_css}"
         ) from ultimo_erro
 
+    def garantir_contexto_iframe_formulario_retificacao(self):
+        """
+        Entra no iframe onde o formulário Angular está renderizado.
+        Sem isso, #cpf_beneficiario não existe no documento principal (mesmo padrão de preencher_dados_iniciais).
+        """
+        timeout_curto = min(3, self.obter_config("TIMEOUT_WEBDRIVER", 10))
+        timeout_iframe = self.obter_config("RETIFICACAO_TIMEOUT_LISTAR", self.obter_config("TIMEOUT_WEBDRIVER", 10))
+
+        candidatos = [
+            (By.ID, "cpf_beneficiario"),
+            (By.CSS_SELECTOR, '[data-testid="cpf_beneficiario"]'),
+            (By.CSS_SELECTOR, 'input[formcontrolname="cpfBeneficiario"]'),
+        ]
+
+        def contexto_tem_campo():
+            for by, locator in candidatos:
+                try:
+                    WebDriverWait(self.driver, timeout_curto).until(
+                        EC.presence_of_element_located((by, locator))
+                    )
+                    return True
+                except TimeoutException:
+                    continue
+            return False
+
+        self.driver.switch_to.default_content()
+        if contexto_tem_campo():
+            return
+
+        iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+        for iframe in iframes:
+            self.driver.switch_to.default_content()
+            self.driver.switch_to.frame(iframe)
+            if contexto_tem_campo():
+                return
+
+        self.driver.switch_to.default_content()
+        if iframes:
+            self.driver.switch_to.frame(0)
+            for by, locator in candidatos:
+                try:
+                    WebDriverWait(self.driver, timeout_iframe).until(
+                        EC.presence_of_element_located((by, locator))
+                    )
+                    return
+                except TimeoutException:
+                    continue
+
     def clicar_por_seletor(self, seletor_css, timeout=None):
         """Aguarda e clica em um elemento por seletor CSS."""
         tempo = timeout if timeout is not None else self.obter_config("TIMEOUT_WEBDRIVER", 10)
@@ -2502,13 +2550,19 @@ class AutomacaoEFD:
 
     def buscar_retificacao_por_cpf(self, cpf_titular):
         """Preenche CPF e clica em Listar na tela de retificação."""
+        self.garantir_contexto_iframe_formulario_retificacao()
+
         seletor_cpf = self.obter_config("RETIFICACAO_SELETOR_CAMPO_CPF", "#cpf_beneficiario")
         seletor_listar = self.obter_config("RETIFICACAO_SELETOR_BOTAO_LISTAR", '[data-testid="botao_listar"]')
         timeout_listar = self.obter_config("RETIFICACAO_TIMEOUT_LISTAR", self.obter_config("TIMEOUT_WEBDRIVER", 10))
 
         seletores_cpf = self.normalizar_seletores(
             seletor_cpf,
-            seletores_fallback=["#cpf_beneficiario", '[data-testid="cpf_beneficiario"]'],
+            seletores_fallback=[
+                "#cpf_beneficiario",
+                '[data-testid="cpf_beneficiario"]',
+                'input[formcontrolname="cpfBeneficiario"]',
+            ],
         )
         seletores_listar = self.normalizar_seletores(
             seletor_listar,
