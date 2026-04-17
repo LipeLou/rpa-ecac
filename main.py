@@ -22,6 +22,7 @@ import sqlite3
 from datetime import datetime
 import pyautogui
 import traceback
+import re
 
 # Importar configurações
 from config import *
@@ -2453,6 +2454,47 @@ class AutomacaoEFD:
 
         return seletores
 
+    def normalizar_cpf(self, valor):
+        """Normaliza CPF mantendo apenas dígitos."""
+        return re.sub(r"\D", "", str(valor or ""))
+
+    def _elemento_pertence_ao_cpf(self, elemento, cpf_normalizado):
+        """
+        Verifica se o elemento está dentro de um bloco visual que contenha o CPF informado.
+        A busca sobe pela árvore de ancestrais para cobrir tabelas/cards.
+        """
+        if not cpf_normalizado:
+            return False
+
+        try:
+            return bool(
+                self.driver.execute_script(
+                    """
+                    const el = arguments[0];
+                    const cpf = arguments[1];
+                    const maxNiveis = 12;
+                    let atual = el;
+
+                    function apenasDigitos(txt) {
+                        return String(txt || "").replace(/\\D/g, "");
+                    }
+
+                    for (let i = 0; i < maxNiveis && atual; i++) {
+                        const texto = apenasDigitos(atual.innerText || atual.textContent || "");
+                        if (texto.includes(cpf)) {
+                            return true;
+                        }
+                        atual = atual.parentElement;
+                    }
+                    return false;
+                    """,
+                    elemento,
+                    cpf_normalizado,
+                )
+            )
+        except Exception:
+            return False
+
     def localizar_elemento_com_fallback(self, seletores_css, timeout, condicao, descricao):
         """Tenta localizar elemento com fallback de seletores CSS."""
         ultimo_erro = None
@@ -2528,11 +2570,35 @@ class AutomacaoEFD:
             condicao=EC.element_to_be_clickable,
             descricao="elemento clicável",
         )
-        try:
-            elemento.click()
-        except Exception:
-            self.driver.execute_script("arguments[0].click();", elemento)
+        self.clicar_elemento_resiliente(elemento, descricao="elemento clicável")
         return elemento
+
+    def clicar_elemento_resiliente(self, elemento, descricao="elemento", tentativas=3, espera=0.35):
+        """
+        Clique robusto: scroll, clique normal, fallback JS e retry curto.
+        """
+        ultimo_erro = None
+        for tentativa in range(1, tentativas + 1):
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                    elemento
+                )
+                time.sleep(0.1)
+                elemento.click()
+                return True
+            except Exception as erro_click:
+                ultimo_erro = erro_click
+                try:
+                    self.driver.execute_script("arguments[0].click();", elemento)
+                    return True
+                except Exception as erro_js:
+                    ultimo_erro = erro_js
+                    if tentativa < tentativas:
+                        time.sleep(espera)
+                    continue
+
+        raise Exception(f"Falha ao clicar em {descricao} após {tentativas} tentativas: {ultimo_erro}")
 
     def preencher_input_por_seletor(self, seletor_css, valor, timeout=None):
         """Preenche um input por seletor CSS."""
@@ -2572,8 +2638,8 @@ class AutomacaoEFD:
         self.preencher_input_por_seletor(seletores_cpf, cpf_titular, timeout=timeout_listar)
         self.clicar_por_seletor(seletores_listar, timeout=timeout_listar)
 
-    def obter_botao_retificar(self):
-        """Retorna o botão Retificar quando existir para o CPF buscado."""
+    def obter_botao_retificar(self, cpf_titular):
+        """Retorna o botão Retificar associado ao CPF informado."""
         seletor_retificar = self.obter_config("RETIFICACAO_SELETOR_BOTAO_RETIFICAR", '[data-testid="botao_retificar"]')
         seletores_retificar = self.normalizar_seletores(
             seletor_retificar,
@@ -2585,15 +2651,89 @@ class AutomacaoEFD:
             ],
         )
         timeout_listar = self.obter_config("RETIFICACAO_TIMEOUT_LISTAR", self.obter_config("TIMEOUT_WEBDRIVER", 10))
-        try:
-            return self.localizar_elemento_com_fallback(
-                seletores_css=seletores_retificar,
-                timeout=timeout_listar,
-                condicao=EC.element_to_be_clickable,
-                descricao="botão Retificar",
+        cpf_normalizado = self.normalizar_cpf(cpf_titular)
+        inicio = time.time()
+
+        while (time.time() - inicio) <= timeout_listar:
+            botoes = []
+            ids_vistos = set()
+            for seletor in seletores_retificar:
+                try:
+                    encontrados = self.driver.find_elements(By.CSS_SELECTOR, seletor)
+                except Exception:
+                    encontrados = []
+
+                for botao in encontrados:
+                    try:
+                        botao_id = botao.id
+                    except Exception:
+                        continue
+                    if botao_id in ids_vistos:
+                        continue
+                    ids_vistos.add(botao_id)
+                    botoes.append(botao)
+
+            # Trava 1: escolher somente botão cuja linha/bloco contenha o CPF atual
+            for botao in botoes:
+                if not self._elemento_pertence_ao_cpf(botao, cpf_normalizado):
+                    continue
+                try:
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                        botao
+                    )
+                    return WebDriverWait(self.driver, 2).until(
+                        lambda d: botao if botao.is_displayed() and botao.is_enabled() else False
+                    )
+                except Exception:
+                    continue
+
+            time.sleep(0.25)
+
+        return None
+
+    def validar_cpf_apos_abrir_evento_retificacao(self, cpf_esperado):
+        """
+        Trava 2: valida se o evento aberto pertence ao CPF esperado.
+        Aborta se um CPF divergente for identificado na tela.
+        """
+        cpf_esperado_norm = self.normalizar_cpf(cpf_esperado)
+        if not cpf_esperado_norm:
+            raise Exception("CPF esperado inválido para validação pós-abertura.")
+
+        candidatos = [
+            "#cpf_beneficiario",
+            '[data-testid="cpf_beneficiario"]',
+            'input[formcontrolname="cpfBeneficiario"]',
+            '[data-testid*="cpf"]',
+            '[id*="cpf"]',
+        ]
+
+        cpfs_encontrados = set()
+        for seletor in candidatos:
+            try:
+                elementos = self.driver.find_elements(By.CSS_SELECTOR, seletor)
+            except Exception:
+                continue
+
+            for elemento in elementos:
+                try:
+                    valor = (elemento.get_attribute("value") or "").strip()
+                    texto = (elemento.text or "").strip()
+                    combinado = f"{valor} {texto}"
+                    for cpf in re.findall(r"\d{3}\D?\d{3}\D?\d{3}\D?\d{2}", combinado):
+                        cpfs_encontrados.add(self.normalizar_cpf(cpf))
+                except Exception:
+                    continue
+
+        cpfs_encontrados = {cpf for cpf in cpfs_encontrados if len(cpf) == 11}
+        if cpfs_encontrados and cpf_esperado_norm not in cpfs_encontrados:
+            raise Exception(
+                f"Divergência de CPF após abrir evento. Esperado: {cpf_esperado} | "
+                f"Detectados na tela: {sorted(cpfs_encontrados)}"
             )
-        except TimeoutException:
-            return None
+
+        return True
 
     def registrar_titular_nao_retificado(self, cpf_titular, nome_titular, valor_planejado, motivo):
         """Registra titular sem retificação para planilha final."""
@@ -2682,7 +2822,7 @@ class AutomacaoEFD:
             self.buscar_retificacao_por_cpf(cpf_titular)
 
             etapa_atual = "aguardar_botao_retificar"
-            botao_retificar = self.obter_botao_retificar()
+            botao_retificar = self.obter_botao_retificar(cpf_titular)
             if not botao_retificar:
                 motivo = "CPF não listado/sem botão Retificar"
                 self.registrar_titular_nao_retificado(cpf_titular, nome_titular, valor_titular, motivo)
@@ -2696,7 +2836,8 @@ class AutomacaoEFD:
                 return "sem_evento"
 
             etapa_atual = "abrir_evento_para_retificar"
-            botao_retificar.click()
+            self.clicar_elemento_resiliente(botao_retificar, descricao=f"botão Retificar do CPF {cpf_titular}")
+            self.validar_cpf_apos_abrir_evento_retificacao(cpf_titular)
             self.salvar_checkpoint(cpf_titular, nome_titular, "retificacao_abrir_evento", "sucesso")
 
             seletor_alterar = self.obter_config(
